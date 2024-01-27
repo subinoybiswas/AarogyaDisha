@@ -9,21 +9,35 @@ import {
   useAnimations,
   OrthographicCamera,
 } from "@react-three/drei";
+
+import { initializeApp } from "firebase/app";
+import DummyComponent from "./dummyComponent";
+import {
+  getFirestore,
+  collection,
+  getDocs,
+  addDoc,
+  doc,
+  setDoc,
+  updateDoc,
+  getDoc,
+} from "firebase/firestore";
+
 import { MeshStandardMaterial } from "three/src/materials/MeshStandardMaterial";
 import { useAuth0 } from "@auth0/auth0-react";
 import "./App.css"; // Import the CSS file
-
+import { transliterate } from "https://cdn.jsdelivr.net/npm/transliteration@2.1.8/dist/browser/bundle.esm.min.js";
 import { LinearEncoding, sRGBEncoding } from "three/src/constants";
 import { LineBasicMaterial, MeshPhysicalMaterial, Vector2 } from "three";
 import ReactAudioPlayer from "react-audio-player";
-
+import { firebaseConfig } from "./db";
 import SpeechRecognition, {
   useSpeechRecognition,
 } from "react-speech-recognition";
 
 import createAnimation from "./converter";
 import blinkData from "./blendDataBlink.json";
-
+import SpeechRecognitionComponent from "./SpeechToTextComponent";
 import * as THREE from "three";
 import axios from "axios";
 
@@ -39,6 +53,8 @@ function Avatar({
   text,
   setAudioSource,
   playing,
+  user,
+  setTranscript,
 }) {
   let gltf = useGLTF(avatar_url);
   let morphTargetDictionaryBody = null;
@@ -211,7 +227,7 @@ function Avatar({
 
     // runCompletion();
 
-    makeSpeech(text)
+    makeSpeech(text, user, setTranscript)
       .then((response) => {
         let { blendData, filename } = response.data;
 
@@ -303,12 +319,28 @@ const configuration = new Configuration({
 const openai = new OpenAIApi(configuration);
 
 //---------------------------------------------------------------------------------------------------------------------------------
+
+async function makeSpeech(text, user, setTranscript) {
+
 let initiateText =
   "Suppose you are a great doctor and have most of medical knowledge and you can tell cure to people. Your name is Sophia. You can help them by your own. Your profession is of a doctor, you can't do any other things accept that. Don't let anyone know that you are an AI model.Wrap your answer in between 30 words";
 let message = [{ role: "system", content: initiateText }];
 async function makeSpeech(text) {
+
   console.log(text);
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+  const userEmail = user.email;
+  const userDocRef = doc(db, "PatientData", userEmail);
+  let initiateText =
+    "MISSION:You are a patient intake chatbot focusing on symptoms. Your mission is to ask questions to help a patient fully articulate their symptoms in a clear manner. Your chat transcript will ultimately be translated into chart notes.,RULES:Ask only one question at a time. Provide some context or clarification around the follow-up questions you ask. Do not converse with the patient. Try to avoid saying things like Thanks for confirming and those things. Also, Don't say all our symtoms at once. Try to avoid long sentences. Do not repeat my symtoms to me. CHARACTER:Try to be helpful and sympathetic to the patient. Your name is Disha.";
+  let message = [{ role: "system", content: initiateText }];
+  message.push({ role: "user", content: "Name: " + user.given_name });
   message.push({ role: "user", content: text });
+
+  try {
+    const docSnap = await getDoc(userDocRef);
+
   const completion = await openai.createChatCompletion({
     model: "gpt-3.5-turbo",
     messages: message,
@@ -319,17 +351,51 @@ async function makeSpeech(text) {
     presence_penalty: 0,
   });
 
-  //await openai.createCompletion({
-  //  model: "text-davinci-003",
-  //  prompt: initiateText+text+"\n",
-  //  max_tokens: 100,
-  //  temperature: 0.1,
-  //});
-  text = completion.data.choices[0].message.content;
-  //console.log("Tokens Used: " + completion);
-  console.log(text);
 
-  return axios.post(host + "/talk", { text });
+    if (!docSnap.exists()) {
+      // If the document doesn't exist, create it with the initial array
+
+      await setDoc(userDocRef, {
+        ChatHistory: message,
+      });
+    } else {
+      // If the document exists, append the new object to the 'ChatHistory' array
+      const chatHistory = docSnap.data().ChatHistory || [];
+      chatHistory.push({ role: "user", content: text });
+
+      await updateDoc(userDocRef, { ChatHistory: chatHistory });
+
+      console.log("Document successfully updated! ", chatHistory);
+    }
+  } catch (error) {
+    console.error("Error updating/creating document:", error);
+  }
+  try {
+    const completion = await openai.createChatCompletion({
+      model: "gpt-3.5-turbo",
+      messages: message,
+      temperature: 0.2,
+      max_tokens: 200,
+      top_p: 1,
+      frequency_penalty: 0,
+      presence_penalty: 0,
+    });
+
+    text = completion.data.choices[0].message.content;
+    console.log(text);
+
+    const docSnap = await getDoc(userDocRef);
+    const chatHistory = docSnap.data().ChatHistory || [];
+    chatHistory.push({ role: "system", content: text });
+    await updateDoc(userDocRef, { ChatHistory: chatHistory });
+    // const completionText = completion.data.choices[0].message.content;
+    message.push({ role: "system", content: text });
+    setTranscript("");
+    return axios.post(host + "/talk", { text });
+  } catch (error) {
+    console.error("An error occurred:", error);
+    return error;
+  }
 }
 
 const STYLES = {
@@ -404,16 +470,15 @@ const STYLES = {
 };
 
 function App() {
+  const [isListening, setIsListening] = useState(false);
+  const [transcript1, setTranscript] = useState("");
+  const [recognizer, setRecognizer] = useState(null);
+
   const { loginWithPopup, logout, user, isAuthenticated } = useAuth0();
   const audioPlayer = useRef();
-  const {
-    transcript,
-    listening,
-    resetTranscript,
-    browserSupportsSpeechRecognition,
-  } = useSpeechRecognition();
+
   const [speak, setSpeak] = useState(false);
-  const [text, setText] = useState(transcript);
+  const [text, setText] = useState(transcript1);
   const [audioSource, setAudioSource] = useState(null);
   const [playing, setPlaying] = useState(false);
 
@@ -431,7 +496,41 @@ function App() {
   }
   console.log();
   if (isAuthenticated) {
+    console.log(user);
     return (
+
+      <div className="full">
+        <div style={STYLES.area}>
+          <div style={STYLES.a1}>
+            <nav style={STYLES.navbar}>
+              <div style={STYLES.leftContent}>Hey, {user.given_name}!</div>
+              <div style={STYLES.rightContent}>
+                {isAuthenticated && (
+                  <button style={STYLES.logoutButton} onClick={logout}>
+                    Logout
+                  </button>
+                )}
+              </div>
+            </nav>
+          </div>
+          <SpeechRecognitionComponent
+            isListening={isListening}
+            transcript={transcript1}
+            recognizer={recognizer}
+            setIsListening={setIsListening}
+            setTranscript={setTranscript}
+            setRecognizer={setRecognizer}
+            STYLES={STYLES}
+            setText={setText}
+            setSpeak={setSpeak}
+          />
+          {/* <button onClick={resetTranscript}>Reset</button> */}
+          {/* <button onClick={() => setSpeak(true)} style={STYLES.speak}> */}
+          {/*  */}
+          {/* {speak ? "Running..." : "Speak"} */}
+          {/* </button> */}
+        </div>
+
       <body style={STYLES.mainbg}>
         <div className="full">
           <div style={STYLES.area}>
@@ -503,9 +602,36 @@ function App() {
               position={[0, 1.66, 1]}
             />
 
+
             {/* <OrbitControls
         target={[0, 1.65, 0]}
       /> */}
+
+
+          <Suspense fallback={null}>
+            <Environment
+              background={false}
+              files="/images/photo_studio_loft_hall_1k.hdr"
+            />
+          </Suspense>
+
+          <Suspense fallback={null}></Suspense>
+
+          <Suspense fallback={null}>
+            <Avatar
+              avatar_url="/model.glb"
+              speak={speak}
+              setSpeak={setSpeak}
+              text={transcript1}
+              setAudioSource={setAudioSource}
+              playing={playing}
+              user={user}
+              setTranscript={setTranscript}
+            />
+          </Suspense>
+        </Canvas>
+        <Loader dataInterpolation={(p) => `Loading... please wait`} />
+      </div>
 
             <Suspense fallback={null}>
               <Environment
@@ -532,16 +658,24 @@ function App() {
           <Loader dataInterpolation={(p) => `Loading... please wait`} />
         </div>
       </body>
+
     );
   } else {
     return (
       <body class="loginBG">
         <div style={STYLES.loginSection} className="loginSection">
           <h1 class="Headline">
+
+            Aarogya<span class="medic">Disha</span>
+          </h1>
+          <h2 class="Tagline">
+            Hi, I am Disha. Sign Up to get me as your own medical assistant
+
             Your<span class="medic">Medic</span>
           </h1>
           <h2 class="Tagline">
             Hi, I am Sophia. Sign Up to get me as your own AI Medic
+
           </h2>
           <button
             style={STYLES.loginButton}
