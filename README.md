@@ -1,4 +1,4 @@
-# YourMedic- AI Avatar Chatbot for Your Medical Issues
+# AarogyaDisha- AI Avatar Chatbot for Your Medical Issues
 
 ## Description
 The project is about a virtual doctor who will be listening to the problems of the patients in concern and will be replying to them with relevant responses and suggestions to their problems. This virtual person will be providing all the feedback in a very human like manner with even similar to human facial muscle movements and facial expressions.
